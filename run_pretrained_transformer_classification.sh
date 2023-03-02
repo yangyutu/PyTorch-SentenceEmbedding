@@ -19,6 +19,6 @@ python tasks/run_pretrained_transformer_classification.py \
 --pooling_method mean_pooling \
 --default_root_dir ./experiments/logs \
 --val_step_interval 4000 \
---normalize_embeddings
+#--normalize_embeddings
 #--log_model
 

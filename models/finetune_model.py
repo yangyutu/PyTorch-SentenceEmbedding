@@ -14,6 +14,7 @@ from transformers import (
     AutoTokenizer,
     PreTrainedModel,
 )
+from transformers.models.bert.modeling_bert import BertOnlyMLMHead
 from models.utils import batch_to_device
 
 # class FineTuneEncoder:
@@ -76,30 +77,6 @@ class ClassificationFinetuneEncoder(pl.LightningModule):
         )
         self.train_accuracy.reset()
 
-    def validation_step(self, batch, batch_idx=0):
-
-        logits = self.model_forward(batch)
-        targets = batch["label"].to(self.device)
-        loss = self.loss_fn(logits, targets.view(-1))
-        self.log(
-            "val_loss",
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-        self.val_accuracy.update(logits, targets)
-
-    def validation_epoch_end(self, outs):
-        # log epoch metric
-        self.log(
-            "val_acc_epoch", self.val_accuracy.compute(), prog_bar=True, logger=True
-        )
-        self.val_accuracy.reset()
-
-        evaluate_stsb(self.model, "/mnt/d/MLData/data/stsbenchmark.tsv", self.device)
-
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), self.config.get("lr", 1e-3))
         lr_warmup_steps = self.config.get("lr_warm_up_steps", 10000)
@@ -119,6 +96,9 @@ class ClassificationFinetuneEncoder(pl.LightningModule):
             },
         }
 
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["encoder_state_dict"] = self.model.state_dict()
+
 
 class NPairContrastiveFinetuneEncoder(pl.LightningModule):
     def __init__(
@@ -134,7 +114,8 @@ class NPairContrastiveFinetuneEncoder(pl.LightningModule):
         self.config = config
 
     def model_forward(self, batch):
-
+        # each batch can contain 2 or most lists of sentences,
+        # first list is anchor, second list is positive, and (optional) third is selected negatives
         sentence_lists = batch
         embeddings = [
             self.model.encode(list(sentence_list), device=self.device)
@@ -337,6 +318,76 @@ class DenoisingAEFinetuneEncoder(pl.LightningModule):
         checkpoint["encoder_state_dict"] = self.model.state_dict()
 
 
+class MLMFineTuneEncoder(pl.LightningModule):
+    def __init__(
+        self,
+        encoder: nn.Module,
+        pretrained_encoder_name: str,
+        config: Dict = {},
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = encoder
+        self._init_lm_head(pretrained_encoder_name)
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.config = config
+
+    def _init_lm_head(self, model_name):
+
+        config = AutoConfig.from_pretrained(model_name)
+        self.lm_head = BertOnlyMLMHead(config)
+
+    def model_forward(self, batch):
+
+        batch = batch_to_device(batch, target_device=self.device)
+        model_input = {k: v for k, v in batch.items() if k != "labels"}
+        labels = batch["labels"]
+        last_hidden_state = self.model.encoder(**model_input).last_hidden_state
+        prediction_scores = self.lm_head(last_hidden_state)
+
+        masked_lm_loss = self.loss_fn(
+            prediction_scores.view(-1, prediction_scores.size(2)), labels.view(-1)
+        )
+
+        return masked_lm_loss
+
+    def training_step(self, batch, batch_idx=0):
+
+        loss = self.model_forward(batch)
+
+        self.log(
+            "train_loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            logger=True,
+        )
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), self.config.get("lr", 1e-3))
+        lr_warmup_steps = self.config.get("lr_warm_up_steps", 10000)
+
+        def lr_foo(step):
+            lr_scale = min((step + 1) ** (-0.5), step / lr_warmup_steps ** (1.5))
+
+            return lr_scale
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_foo)
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
+
+    def on_save_checkpoint(self, checkpoint):
+        checkpoint["encoder_state_dict"] = self.model.state_dict()
+
+
 def _test_model():
     from models.classifier_head import ClassifierHead
 
@@ -374,7 +425,6 @@ def _test_triplet_model():
 
 
 def _test_denoise_model():
-    from losses.multiple_negative_ranking_loss import MultipleNegativesRankingLoss
 
     encoder = PretrainedSentenceEncoder("bert-base-uncased")
 
@@ -389,5 +439,22 @@ def _test_denoise_model():
         break
 
 
+def _test_mlm_model():
+
+    encoder = PretrainedSentenceEncoder("bert-base-uncased")
+
+    from data_utils.wiki_data import MLMWikiTextDataModule
+
+    model = MLMFineTuneEncoder(encoder, "bert-base-uncased")
+    model.to("cuda")
+    data_loader = MLMWikiTextDataModule(
+        "snli", "bert-base-uncased", 128, batch_size=16
+    ).train_dataloader()
+
+    for batch in data_loader:
+        model.training_step(batch=batch, batch_idx=0)
+        break
+
+
 if __name__ == "__main__":
-    _test_denoise_model()
+    _test_mlm_model()

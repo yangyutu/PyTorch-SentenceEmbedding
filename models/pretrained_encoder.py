@@ -6,7 +6,7 @@ from torch import Tensor, device
 import numpy as np
 from tqdm.autonotebook import trange
 
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AutoConfig
 from models.utils import batch_to_device
 
 
@@ -17,9 +17,17 @@ class PretrainedSentenceEncoder(nn.Module):
         truncate: int = 128,
         pooling_method: str = "mean_pooling",
         normalize_embeddings: bool = True,
+        num_layers = None
     ):
         super().__init__()
-        self.encoder = AutoModel.from_pretrained(pretrained_model_name)
+        
+        if num_layers is None or num_layers < 0:        
+            self.encoder = AutoModel.from_pretrained(pretrained_model_name)
+        else:
+            model_config = AutoConfig.from_pretrained(pretrained_model_name)
+            model_config.update({"num_hidden_layers": num_layers})
+            self.encoder = AutoModel.from_pretrained(pretrained_model_name, config=model_config)
+
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
         self.truncate = truncate
         assert pooling_method in ["mean_pooling", "cls"]
@@ -101,7 +109,8 @@ class PretrainedSentenceEncoder(nn.Module):
 def _test_pretrained_encoder():
     pretrained_model_name = "bert-base-uncased"
     device = "cuda"
-    model = PretrainedSentenceEncoder(pretrained_model_name=pretrained_model_name)
+    model = PretrainedSentenceEncoder(pretrained_model_name=pretrained_model_name, num_layers=3)
+    print(model)
     input = ["hello world", "great"]
     model.to(device)
     embeddings = model.encode(input, device=device)

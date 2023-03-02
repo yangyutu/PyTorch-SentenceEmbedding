@@ -10,6 +10,10 @@ from models.pretrained_encoder import PretrainedSentenceEncoder
 from losses.multiple_negative_ranking_loss import MultipleNegativesRankingLoss
 from data_utils.nli_data import AllNliTripletTextDataModule
 
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 
 def main(args):
 
@@ -33,6 +37,7 @@ def main(args):
         truncate=args.truncate,
         pooling_method=args.pooling_method,
         normalize_embeddings=args.normalize_embeddings,
+        num_layers=args.num_layers,
     )
     loss = MultipleNegativesRankingLoss()
     model = NPairContrastiveFinetuneEncoder(encoder=encoder_model, contrast_loss=loss)
@@ -46,12 +51,15 @@ def main(args):
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     project_name = "sentence_bert_finetune"
+    tags = [args.pretrained_model_name, args.dataset_name, "contrastive"]
+    if args.num_layers > 0:
+        tags.append(f"num_layers:{str(args.num_layers)}")
     wandb_logger = WandbLogger(
         project=project_name,  # group runs in "MNIST" project
         log_model="all" if args.log_model else False,
         save_dir=args.default_root_dir,
         group=args.dataset_name,
-        tags=[args.pretrained_model_name, args.dataset_name, "contrastive"],
+        tags=tags,
     )
 
     trainer = Trainer(
@@ -104,6 +112,7 @@ def parse_arguments():
     parser.add_argument("--truncate", type=int, default=128)
     parser.add_argument("--pooling_method", type=str, default="mean_pooling")
     parser.add_argument("--normalize_embeddings", action="store_true")
+    parser.add_argument("--num_layers", type=int, default=-1)
     parser.add_argument("--pretrained_model_name", type=str, default="")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=16)
